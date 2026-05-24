@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Balufy Pro</title>
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+
+    <!--
+      Fonts are self-hosted — run fetch_fonts.sh once to populate static/fonts/.
+      No external CDN links = SRI finding 90003 closed.
+    -->
+    <link rel="stylesheet" href="/static/fonts/inter.css">
+    <link rel="stylesheet" href="/static/fonts/material-symbols-outlined.css">
+
+    <!-- Application styles -->
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+
+    <div id="ambient-layer"></div>
+
+    <header>
+        <div class="logo">
+            <span class="material-symbols-outlined">graphic_eq</span>
+            Balufy Pro
+        </div>
+        <a href="{{ url_for('logout') }}" class="logout">Logout</a>
+    </header>
+
+    <!-- Main navigation tabs -->
+    <nav class="main-nav">
+        <button class="nav-tab active" id="tab-library" onclick="switchTab('library')">
+            <span class="material-symbols-outlined">library_music</span> Library
+        </button>
+        <button class="nav-tab" id="tab-artists" onclick="switchTab('artists')">
+            <span class="material-symbols-outlined">people</span> Artists
+        </button>
+        <button class="nav-tab" id="tab-hits" onclick="switchTab('hits')">
+            <span class="material-symbols-outlined">auto_awesome</span> Today's Hits
+        </button>
+        <button class="nav-tab" id="tab-liked" onclick="switchTab('liked')">
+            <span class="material-symbols-outlined">favorite</span> Liked
+            <span class="nav-badge" id="liked-count"></span>
+        </button>
+
+        <!-- Lyrics prefetch progress pill -->
+        <div id="cache-progress">
+            <span>Caching lyrics</span>
+            <div class="cp-bar-wrap"><div class="cp-bar-fill" id="cp-bar"></div></div>
+            <span id="cp-text"></span>
+        </div>
+    </nav>
+
+    <main id="main-scroll">
+
+        <!-- ── Library view ──────────────────────────────────────── -->
+        <div id="view-library" class="view active">
+            <h2 class="section-label">Albums</h2>
+            <div id="album-container" class="album-grid"></div>
+
+            <h2 class="section-label">Tracks</h2>
+            <div id="loose-track-container" class="track-list"></div>
+        </div>
+
+        <!-- ── Album detail view ─────────────────────────────────── -->
+        <div id="view-album" class="view">
+            <div class="back-wrap">
+                <button class="back-btn" onclick="showLibrary()">
+                    <span class="material-symbols-outlined">arrow_back</span> Back
+                </button>
+            </div>
+
+            <div class="album-detail-header">
+                <div class="detail-art" id="detail-art-box"></div>
+                <div class="detail-meta">
+                    <h1 id="detail-title">Album Title</h1>
+                    <p id="detail-artist">Artist Name</p>
+                </div>
+            </div>
+
+            <div class="album-actions">
+                <button class="action-btn play-all" onclick="playAlbum(false)">
+                    <span class="material-symbols-outlined">play_arrow</span>
+                    Play
+                </button>
+                <button class="action-btn shuffle-all" onclick="playAlbum(true)">
+                    <span class="material-symbols-outlined">shuffle</span>
+                    Shuffle
+                </button>
+            </div>
+
+            <div id="album-track-container" class="track-list"></div>
+        </div>
+
+        <!-- ── Liked songs view ──────────────────────────────────── -->
+        <div id="view-liked" class="view">
+            <div id="liked-play-actions" class="liked-actions" style="display:none;">
+                <button class="action-btn play-all" onclick="playLiked(false)">
+                    <span class="material-symbols-outlined">play_arrow</span>
+                    Play All
+                </button>
+                <button class="action-btn shuffle-all" onclick="playLiked(true)">
+                    <span class="material-symbols-outlined">shuffle</span>
+                    Shuffle
+                </button>
+            </div>
+            <div id="liked-track-container" class="track-list"></div>
+        </div>
+
+        <!-- ── Artists view ──────────────────────────────────────── -->
+        <div id="view-artists" class="view">
+            <h2 class="section-label">Artists</h2>
+            <div id="artist-grid-container" class="artist-grid"></div>
+        </div>
+
+        <!-- ── Artist detail view ────────────────────────────────── -->
+        <div id="view-artist" class="view">
+            <div class="back-wrap" style="pointer-events:none;">
+                <button class="back-btn" onclick="showArtists()" style="pointer-events:all;">
+                    <span class="material-symbols-outlined">arrow_back</span> Artists
+                </button>
+            </div>
+            <div class="album-detail-header">
+                <div class="detail-art" id="artist-detail-art-box"
+                     style="display:flex;align-items:center;justify-content:center;background:var(--bg-card);">
+                    <span class="material-symbols-outlined" style="font-size:5rem;color:#2a2a2a;">person</span>
+                </div>
+                <div class="detail-meta">
+                    <h1 id="artist-detail-name">Artist</h1>
+                    <p id="artist-detail-meta" style="color:var(--text-dim);"></p>
+                </div>
+            </div>
+            <div class="album-actions">
+                <button class="action-btn play-all" onclick="playArtist(false)">
+                    <span class="material-symbols-outlined">play_arrow</span> Play
+                </button>
+                <button class="action-btn shuffle-all" onclick="playArtist(true)">
+                    <span class="material-symbols-outlined">shuffle</span> Shuffle
+                </button>
+            </div>
+            <div id="artist-track-container" class="track-list"></div>
+        </div>
+
+        <!-- ── Today's Hits view ─────────────────────────────────── -->
+        <div id="view-hits" class="view">
+            <div class="hits-header">
+                <div>
+                    <h2 class="section-label" style="margin-bottom:0.4rem;">Today's Hits</h2>
+                    <span class="hits-meta" id="hits-meta">Generated from your listening habits</span>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <span class="pf-dot" id="hits-pf-dot"></span>
+                    <button class="hits-regen-btn" id="hits-regen-btn" onclick="loadTodayHits(true)">
+                        <span class="material-symbols-outlined">refresh</span> Regenerate
+                    </button>
+                    <button class="action-btn play-all" style="padding:7px 16px;font-size:0.82rem;" onclick="playHits(false)">
+                        <span class="material-symbols-outlined">play_arrow</span> Play
+                    </button>
+                    <button class="action-btn shuffle-all" style="padding:7px 16px;font-size:0.82rem;" onclick="playHits(true)">
+                        <span class="material-symbols-outlined">shuffle</span> Shuffle
+                    </button>
+                </div>
+            </div>
+            <div id="hits-track-container" class="track-list"></div>
+        </div>
+
+    </main>
+
+    <!-- ── Lyrics panel ──────────────────────────────────────── -->
+    <div id="lyrics-panel">
+        <div id="lyrics-header">
+            <span id="lyrics-source"></span>
+        </div>
+        <div id="lyrics-scroll">
+            <div class="lyrics-status">Play a track to load lyrics</div>
+        </div>
+    </div>
+
+    <!-- ── Player bar ────────────────────────────────────────── -->
+    <div class="player-bar">
+        <div class="p-info">
+            <div class="p-art" id="p-art">
+                <span class="material-symbols-outlined" style="margin: 14px; color: #333;">music_note</span>
+            </div>
+            <div class="p-text">
+                <div class="p-title" id="p-title">Select a track</div>
+                <div class="p-artist" id="p-artist">Waiting for music...</div>
+            </div>
+        </div>
+
+        <div class="p-controls">
+            <div class="btn-group">
+                <button class="icon-btn" id="btn-shuffle" onclick="toggleShuffle()" title="Shuffle (S)">
+                    <span class="material-symbols-outlined">shuffle</span>
+                </button>
+                <button class="icon-btn" onclick="playPrev()" title="Previous (←)">
+                    <span class="material-symbols-outlined">skip_previous</span>
+                </button>
+                <button class="icon-btn play-btn" onclick="togglePlay()" title="Play/Pause (Space)">
+                    <span class="material-symbols-outlined" id="play-icon">play_arrow</span>
+                </button>
+                <button class="icon-btn" onclick="playNext()" title="Next (→)">
+                    <span class="material-symbols-outlined">skip_next</span>
+                </button>
+                <button class="icon-btn" id="btn-repeat" onclick="toggleRepeat()" title="Repeat (R)">
+                    <span class="material-symbols-outlined">repeat</span>
+                </button>
+            </div>
+            <div class="scrubber-box">
+                <span class="time-label" id="cur-time">0:00</span>
+                <div class="progress-bg" id="progress-bar"
+                     onclick="seek(event)"
+                     onmousemove="scrubHover(event)"
+                     onmouseleave="clearScrubHover()">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <span class="time-label" id="tot-time">0:00</span>
+            </div>
+        </div>
+
+        <div class="p-volume">
+            <button class="icon-btn" id="btn-like" onclick="toggleLikeCurrentTrack()" title="Like/Unlike">
+                <span class="material-symbols-outlined" id="like-icon">favorite_border</span>
+            </button>
+            <button class="icon-btn" id="btn-lyrics" onclick="toggleLyrics()" title="Lyrics (L)">
+                <span class="material-symbols-outlined">lyrics</span>
+            </button>
+            <button class="icon-btn" id="btn-eq" onclick="toggleEqPanel()" title="Equalizer">
+                <span class="material-symbols-outlined">graphic_eq</span>
+            </button>
+            <select class="quality-select" id="quality-select"
+                    onchange="onQualityChange(this.value)"
+                    title="Stream quality">
+                <option value="original">Original</option>
+                <option value="320" {{ '' if ffmpeg_available else 'disabled' }}>320 kbps</option>
+                <option value="192" {{ '' if ffmpeg_available else 'disabled' }}>192 kbps</option>
+                <option value="128" {{ '' if ffmpeg_available else 'disabled' }}>128 kbps</option>
+            </select>
+            <span class="material-symbols-outlined" style="font-size: 18px; color: var(--text-dim);">volume_up</span>
+            <div class="vol-slider" onclick="setVolume(event)">
+                <div class="vol-fill" id="vol-fill"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Equalizer panel ───────────────────────────────────── -->
+    <div id="eq-panel">
+        <div class="eq-panel-header">
+            <span class="eq-panel-title">Equalizer</span>
+            <button class="eq-reset-btn" onclick="eqReset()">Reset</button>
+        </div>
+        <div class="eq-presets" id="eq-presets">
+            <button class="eq-preset-btn active" onclick="eqPreset('flat')">Flat</button>
+            <button class="eq-preset-btn" onclick="eqPreset('bass')">Bass Boost</button>
+            <button class="eq-preset-btn" onclick="eqPreset('vocal')">Vocal</button>
+            <button class="eq-preset-btn" onclick="eqPreset('treble')">Treble</button>
+            <button class="eq-preset-btn" onclick="eqPreset('electronic')">Electronic</button>
+        </div>
+        <div class="eq-bands" id="eq-bands">
+            <!-- Bands injected by equalizer.js -->
+        </div>
+    </div>
+
+    <!-- ── Keyboard shortcut toast ──────────────────────────── -->
+    <div id="kbd-toast"></div>
+
+    <audio id="main-audio"></audio>
+
+    <!--
+        JavaScript modules — load order matters:
+          1. state.js          shared state + audio element reference
+          2. utils.js          escHtml, fmtTime, showToast
+          3. cover-loader.js   CoverLoader (throttled lazy image load)
+          4. prefetch-manager.js  PrefetchManager (audio blob cache)
+          5. listen-tracker.js ListenTracker (habit telemetry)
+          6. player.js         playback engine, scrubber, ambient colour
+          7. lyrics.js         lyrics panel, LRC, cache progress
+          8. library.js        all views + tab/navigation logic
+          9. equalizer.js      Web Audio EQ panel
+         10. app.js            bootstrap, keyboard shortcuts, lifecycle
+    -->
+    <script src="/static/js/state.js"></script>
+    <script src="/static/js/utils.js"></script>
+    <script src="/static/js/cover-loader.js"></script>
+    <script src="/static/js/prefetch-manager.js"></script>
+    <script src="/static/js/listen-tracker.js"></script>
+    <script src="/static/js/player.js"></script>
+    <script src="/static/js/lyrics.js"></script>
+    <script src="/static/js/library.js"></script>
+    <script src="/static/js/equalizer.js"></script>
+    <script src="/static/js/app.js"></script>
+
+</body>
+</html>
