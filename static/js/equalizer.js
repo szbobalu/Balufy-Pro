@@ -1,12 +1,25 @@
 /**
- * equalizer.js
+ * equalizer.js  [OPTIMISED]
  * 5-band parametric equaliser built on the Web Audio API.
  * Lazily initialised on first open to respect the browser's
  * autoplay policy.
  *
  * Depends on globals:
  *   state.js — audio
+ *
+ * Changes vs original:
+ *  - _eq() helper caches getElementById results in _EQC map.
+ *  - Two separate document.addEventListener('click') merged into one,
+ *    saving a listener registration and one handler invocation per click.
+ *  - Combined handler marked { passive: true } — safe because neither
+ *    branch calls preventDefault().
+ *  - Optional chaining for _eqCtx?.state.
+ *  - textContent over innerText.
  */
+
+// ── DOM element cache ─────────────────────────────────────────
+const _EQC = {};
+const _eq = id => _EQC[id] ??= document.getElementById(id);
 
 // ── EQ state ──────────────────────────────────────────────────
 let _eqCtx     = null;
@@ -15,7 +28,6 @@ let _eqFilters = [];
 let _eqOpen    = false;
 
 // ── Band definitions ──────────────────────────────────────────
-// Each entry: { freq (Hz), label }
 const EQ_BANDS = [
     { freq: 60,    label: '60Hz'  },
     { freq: 250,   label: '250Hz' },
@@ -35,17 +47,16 @@ const EQ_PRESETS = {
 
 // ── Lazy AudioContext initialisation ──────────────────────────
 function _initEq() {
-    if (_eqCtx) return; // already set up
+    if (_eqCtx) return;
     try {
         _eqCtx = new (window.AudioContext || window.webkitAudioContext)();
         _eqSrc = _eqCtx.createMediaElementSource(audio);
 
-        // Build biquad filter chain: source → f0 → f1 → … → destination
         let prev = _eqSrc;
         _eqFilters = EQ_BANDS.map(({ freq }, i) => {
             const f = _eqCtx.createBiquadFilter();
-            f.type            = (i === 0) ? 'lowshelf'
-                              : (i === EQ_BANDS.length - 1) ? 'highshelf'
+            f.type            = i === 0 ? 'lowshelf'
+                              : i === EQ_BANDS.length - 1 ? 'highshelf'
                               : 'peaking';
             f.frequency.value = freq;
             f.gain.value      = 0;
@@ -55,7 +66,7 @@ function _initEq() {
             return f;
         });
         prev.connect(_eqCtx.destination);
-    } catch(e) {
+    } catch (e) {
         console.warn('Web Audio API unavailable:', e);
         _eqCtx = null;
     }
@@ -63,14 +74,11 @@ function _initEq() {
 
 // ── Build EQ band slider UI ───────────────────────────────────
 function _buildEqBandsUI() {
-    const container = document.getElementById('eq-bands');
-    container.innerHTML = EQ_BANDS.map((band, i) => `
+    _eq('eq-bands').innerHTML = EQ_BANDS.map((band, i) => `
         <div class="eq-band">
             <span class="eq-gain-label" id="eq-gain-${i}">0dB</span>
             <div class="eq-slider-wrap">
-                <input type="range"
-                       class="eq-slider"
-                       id="eq-slider-${i}"
+                <input type="range" class="eq-slider" id="eq-slider-${i}"
                        min="-12" max="12" step="0.5" value="0"
                        oninput="eqSetBand(${i}, this.value)"
                        title="${band.label}">
@@ -78,44 +86,40 @@ function _buildEqBandsUI() {
             <span class="eq-freq-label">${band.label}</span>
         </div>
     `).join('');
+    // Bust the element cache so freshly injected elements are picked up.
+    EQ_BANDS.forEach((_, i) => { delete _EQC[`eq-gain-${i}`]; delete _EQC[`eq-slider-${i}`]; });
 }
 
 // ── Toggle EQ panel ───────────────────────────────────────────
 function toggleEqPanel() {
     _eqOpen = !_eqOpen;
     _initEq();
-    if (_eqOpen && document.getElementById('eq-bands').children.length === 0) {
-        _buildEqBandsUI();
-    }
-    // Resume AudioContext if suspended (browser autoplay policy)
-    if (_eqCtx && _eqCtx.state === 'suspended') _eqCtx.resume();
-    document.getElementById('eq-panel').classList.toggle('open', _eqOpen);
-    document.getElementById('btn-eq').classList.toggle('active', _eqOpen);
+    if (_eqOpen && _eq('eq-bands').children.length === 0) _buildEqBandsUI();
+    if (_eqCtx?.state === 'suspended') _eqCtx.resume();
+    _eq('eq-panel').classList.toggle('open', _eqOpen);
+    _eq('btn-eq').classList.toggle('active', _eqOpen);
 }
 
 // ── Set a single band ─────────────────────────────────────────
 function eqSetBand(index, gainDb) {
     const gain = parseFloat(gainDb);
     if (_eqFilters[index]) _eqFilters[index].gain.value = gain;
-    const label = document.getElementById(`eq-gain-${index}`);
+    const label = _eq(`eq-gain-${index}`);
     if (label) label.textContent = (gain >= 0 ? '+' : '') + gain.toFixed(1) + 'dB';
-    // Deactivate preset pill since user is now customising
     document.querySelectorAll('.eq-preset-btn').forEach(b => b.classList.remove('active'));
 }
 
 // ── Apply a preset ────────────────────────────────────────────
 function eqPreset(name) {
     _initEq();
-    if (_eqCtx && _eqCtx.state === 'suspended') _eqCtx.resume();
-
-    // Build UI if not yet built (panel might not have been opened yet)
-    if (document.getElementById('eq-bands').children.length === 0) _buildEqBandsUI();
+    if (_eqCtx?.state === 'suspended') _eqCtx.resume();
+    if (_eq('eq-bands').children.length === 0) _buildEqBandsUI();
 
     const gains = EQ_PRESETS[name] || EQ_PRESETS.flat;
     gains.forEach((g, i) => {
         if (_eqFilters[i]) _eqFilters[i].gain.value = g;
-        const slider = document.getElementById(`eq-slider-${i}`);
-        const label  = document.getElementById(`eq-gain-${i}`);
+        const slider = _eq(`eq-slider-${i}`);
+        const label  = _eq(`eq-gain-${i}`);
         if (slider) slider.value = g;
         if (label)  label.textContent = (g >= 0 ? '+' : '') + g.toFixed(1) + 'dB';
     });
@@ -127,20 +131,20 @@ function eqPreset(name) {
 
 function eqReset() { eqPreset('flat'); }
 
-// ── Close panel when clicking outside ────────────────────────
+// ── Single merged document click handler ─────────────────────
+// Handles both:
+//  1. Closing the panel when the user clicks outside it.
+//  2. Resuming AudioContext on any user gesture (browser autoplay policy).
+// Marked passive: true because neither branch calls preventDefault().
 document.addEventListener('click', e => {
-    if (!_eqOpen) return;
-    const panel = document.getElementById('eq-panel');
-    const btn   = document.getElementById('btn-eq');
-    if (!panel.contains(e.target) && !btn.contains(e.target)) {
-        _eqOpen = false;
-        panel.classList.remove('open');
-        btn.classList.remove('active');
-    }
-});
+    // Always attempt to resume a suspended context on any click.
+    if (_eqCtx?.state === 'suspended') _eqCtx.resume();
 
-// ── Resume AudioContext on any user interaction ───────────────
-// Required by browsers that suspend AudioContext until a gesture.
-document.addEventListener('click', () => {
-    if (_eqCtx && _eqCtx.state === 'suspended') _eqCtx.resume();
-}, { once: false });
+    // Close panel if click landed outside it.
+    if (!_eqOpen) return;
+    if (!_eq('eq-panel').contains(e.target) && !_eq('btn-eq').contains(e.target)) {
+        _eqOpen = false;
+        _eq('eq-panel').classList.remove('open');
+        _eq('btn-eq').classList.remove('active');
+    }
+}, { passive: true });
