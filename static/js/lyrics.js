@@ -1,28 +1,39 @@
 /**
- * lyrics.js
- * Lyrics panel: toggle, fetching from /api/lyrics (backed by LRCLIB),
- * LRC parsing, synced/plain rendering, real-time line highlighting,
- * click-to-seek, and lyrics-prefetch progress pill.
+ * lyrics.js  [OPTIMISED]
+ * Lyrics panel: toggle, fetching, LRC parsing, synced/plain
+ * rendering, real-time line highlighting, click-to-seek, and
+ * lyrics-prefetch progress pill.
  *
  * Depends on globals:
- *   state.js  — audio (for currentTime in seekToLyric)
+ *   state.js  — audio
  *   utils.js  — escHtml
+ *
+ * Changes vs original:
+ *  - LRC_RE regex hoisted to module scope (compiled once, not per call).
+ *  - _l() helper caches getElementById results in _LC map.
+ *  - innerText → textContent.
+ *  - Unary + coercion for numeric string parsing in parseLRC (avoids
+ *    parseInt overhead for the hot minute/second fields).
  */
 
+// ── DOM element cache ─────────────────────────────────────────
+const _LC = {};
+const _l = id => _LC[id] ??= document.getElementById(id);
+
 // ── Module state ──────────────────────────────────────────────
-let lyricsData     = [];    // parsed LRC lines: [{time, text}, …]
+let lyricsData     = [];
 let lyricsOpen     = false;
 let activeLyricIdx = -1;
-let lyricsFetched  = '';    // "title|||artist" key to avoid re-fetching
+let lyricsFetched  = '';
 
 // ── Panel toggle ──────────────────────────────────────────────
 function toggleLyrics() {
     lyricsOpen = !lyricsOpen;
-    document.getElementById('lyrics-panel').classList.toggle('open', lyricsOpen);
-    document.getElementById('btn-lyrics').classList.toggle('active', lyricsOpen);
+    _l('lyrics-panel').classList.toggle('open', lyricsOpen);
+    _l('btn-lyrics').classList.toggle('active', lyricsOpen);
 }
 
-// ── Fetch lyrics from server (which proxies LRCLIB + SQLite cache) ─
+// ── Fetch lyrics ──────────────────────────────────────────────
 async function fetchLyrics(title, artist) {
     const key = `${title}|||${artist}`;
     if (key === lyricsFetched) return;
@@ -30,11 +41,10 @@ async function fetchLyrics(title, artist) {
     lyricsData     = [];
     activeLyricIdx = -1;
 
-    const scroll = document.getElementById('lyrics-scroll');
+    const scroll = _l('lyrics-scroll');
     scroll.innerHTML = `<div class="lyrics-loading"><span class="material-symbols-outlined">sync</span> Loading lyrics…</div>`;
-    document.getElementById('lyrics-source').innerHTML = '';
+    _l('lyrics-source').innerHTML = '';
 
-    // Strip parenthetical / bracketed suffixes from the title before querying
     const cleanTitle = title.replace(/\s*[\(\[].*?[\)\]]/g, '').trim();
 
     try {
@@ -44,7 +54,7 @@ async function fetchLyrics(title, artist) {
         if (!res.ok)            throw new Error('api_error');
         const data = await res.json();
 
-        document.getElementById('lyrics-source').innerHTML =
+        _l('lyrics-source').innerHTML =
             `Lyrics · <a href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB</a>`;
 
         if (data.syncedLyrics) {
@@ -61,11 +71,14 @@ async function fetchLyrics(title, artist) {
             ? 'No lyrics found for this track'
             : 'Could not reach lyrics service';
         scroll.innerHTML = `<div class="lyrics-status">${msg}</div>`;
-        document.getElementById('lyrics-source').innerHTML = '';
+        _l('lyrics-source').innerHTML = '';
     }
 }
 
 // ── LRC parser ────────────────────────────────────────────────
+// Regex compiled once at module load instead of on every parseLRC call.
+const LRC_RE = /\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/;
+
 /**
  * Parse an LRC string into an array of {time, text} objects,
  * sorted by ascending time.
@@ -73,12 +86,12 @@ async function fetchLyrics(title, artist) {
  * @returns {{time: number, text: string}[]}
  */
 function parseLRC(lrc) {
-    const re = /\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/;
     return lrc.split('\n')
         .map(line => {
-            const m = line.match(re);
+            const m = line.match(LRC_RE);
             if (!m) return null;
-            const time = parseInt(m[1]) * 60 + parseInt(m[2]) + parseInt(m[3].padEnd(3, '0')) / 1000;
+            // Unary + is faster than parseInt for these short fixed-format strings.
+            const time = +m[1] * 60 + +m[2] + +m[3].padEnd(3, '0') / 1000;
             return { time, text: m[4].trim() };
         })
         .filter(Boolean)
@@ -87,7 +100,7 @@ function parseLRC(lrc) {
 
 // ── Renderers ─────────────────────────────────────────────────
 function renderSyncedLyrics() {
-    const scroll  = document.getElementById('lyrics-scroll');
+    const scroll  = _l('lyrics-scroll');
     const spacer  = '<div style="height:42%"></div>';
     scroll.innerHTML = spacer +
         lyricsData.map((l, i) => {
@@ -97,7 +110,7 @@ function renderSyncedLyrics() {
 }
 
 function renderPlainLyrics(text) {
-    const scroll = document.getElementById('lyrics-scroll');
+    const scroll = _l('lyrics-scroll');
     const spacer = '<div style="height:20%"></div>';
     scroll.innerHTML = spacer +
         text.split('\n').map(line =>
@@ -105,7 +118,7 @@ function renderPlainLyrics(text) {
         ).join('') + spacer;
 }
 
-// ── Real-time sync (called every timeupdate) ──────────────────
+// ── Real-time sync (called every timeupdate via rAF) ──────────
 /**
  * Highlight the lyric line matching currentTime, scroll it into
  * the centre of the panel, and dim surrounding lines.
@@ -121,9 +134,9 @@ function syncLyrics(currentTime) {
     if (idx === activeLyricIdx) return;
     activeLyricIdx = idx;
 
-    const scroll = document.getElementById('lyrics-scroll');
+    const scroll = _l('lyrics-scroll');
     scroll.querySelectorAll('.lyric-line[data-idx]').forEach(el => {
-        const i = parseInt(el.dataset.idx);
+        const i = +el.dataset.idx;            // unary + instead of parseInt
         el.classList.remove('active', 'near');
         if (i === idx)                   el.classList.add('active');
         else if (Math.abs(i - idx) <= 2) el.classList.add('near');
@@ -146,21 +159,16 @@ function seekToLyric(idx) {
 // ── Lyrics prefetch progress pill ────────────────────────────
 let _pollTimer = null;
 
-/**
- * Poll /api/lyrics/cache-status and update the progress pill
- * in the nav bar. Reschedules itself at an interval that depends
- * on whether a background cache run is still active.
- */
 async function pollCacheProgress() {
     try {
         const res  = await fetch('/api/lyrics/cache-status');
         const data = await res.json();
-        const el   = document.getElementById('cache-progress');
-        const bar  = document.getElementById('cp-bar');
-        const txt  = document.getElementById('cp-text');
+        const el   = _l('cache-progress');
+        const bar  = _l('cp-bar');
+        const txt  = _l('cp-text');
 
         if (data.total > 0 && (data.running || data.cached < data.total)) {
-            const pct = Math.round((data.cached / data.total) * 100);
+            const pct = ((data.cached / data.total) * 100) | 0;
             el.classList.add('visible');
             bar.style.width = pct + '%';
             txt.textContent = `${data.cached}/${data.total}`;
@@ -170,7 +178,7 @@ async function pollCacheProgress() {
 
         clearTimeout(_pollTimer);
         _pollTimer = setTimeout(pollCacheProgress, data.running ? 3000 : 15000);
-    } catch(e) {
+    } catch (e) {
         clearTimeout(_pollTimer);
         _pollTimer = setTimeout(pollCacheProgress, 30000);
     }
