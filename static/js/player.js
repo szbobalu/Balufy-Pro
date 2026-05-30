@@ -1,5 +1,5 @@
 /**
- * player.js
+ * player.js  [OPTIMISED]
  * Core playback engine: queue management, transport controls,
  * scrubber, volume, ambient colour extraction, and stream quality.
  *
@@ -10,9 +10,30 @@
  *   cover-loader.js
  *   prefetch-manager.js
  *   listen-tracker.js
- *   lyrics.js      — fetchLyrics, syncLyrics (called via audio events)
- *   equalizer.js   — _eqCtx (resumed on play)
+ *   lyrics.js      — fetchLyrics, syncLyrics
+ *   equalizer.js   — _eqCtx
+ *
+ * Changes vs original:
+ *  - _p() helper caches every getElementById result in _PC map.
+ *    ontimeupdate fired 4-5×/sec — zero getElementById calls now.
+ *  - ontimeupdate wrapped in requestAnimationFrame (_ticking flag)
+ *    so the handler body runs at most once per display frame (~60fps)
+ *    instead of every browser timeupdate tick.
+ *  - updatePlayingRow tracks _activeRow directly (O(1)) instead of
+ *    querySelectorAll('.track-row') scanning the full DOM (O(N)).
+ *  - togglePlay uses _activeRow directly instead of querySelectorAll.
+ *  - innerText → textContent everywhere (avoids forced layout recalc).
+ *  - Optional chaining for _eqCtx?.state checks.
  */
+
+// ── DOM element cache ─────────────────────────────────────────
+const _PC = {};
+/** Return cached element; look up and store on first access. */
+const _p = id => _PC[id] ??= document.getElementById(id);
+
+// ── Currently highlighted track row ──────────────────────────
+// Tracked so we can do O(1) class toggles instead of DOM scans.
+let _activeRow = null;
 
 // ── Stream URL builder ────────────────────────────────────────
 function buildStreamUrl(path, seekSecs) {
@@ -28,25 +49,21 @@ function startPlayback() {
     if (cursor < 0 || cursor >= queue.length) return;
     const track = queue[cursor];
 
-    // Report previous track listen duration
     ListenTracker.start(track.path);
 
-    // Use prefetched Blob URL when available (original quality only);
-    // fall back to the stream endpoint for transcoded or un-cached tracks.
     const cachedUrl = (streamQuality === 'original')
         ? PrefetchManager.getUrl(track.path)
         : null;
     audio.src = cachedUrl || buildStreamUrl(track.path, 0);
 
-    document.getElementById('p-title').innerText  = track.title;
-    document.getElementById('p-artist').innerText = track.artist;
-    document.getElementById('tot-time').innerText = track.duration_fmt;
+    _p('p-title').textContent  = track.title;
+    _p('p-artist').textContent = track.artist;
+    _p('tot-time').textContent = track.duration_fmt;
 
-    // Player art — single on-demand request, bypasses CoverLoader intentionally.
-    const artBox = document.getElementById('p-art');
+    const artBox = _p('p-art');
     artBox.innerHTML = track.has_cover
         ? `<img src="/api/cover/${encodeURIComponent(track.path)}" loading="eager">`
-        : '<span class="material-symbols-outlined" style="margin: 14px; color: #333;">music_note</span>';
+        : '<span class="material-symbols-outlined" style="margin:14px;color:#333">music_note</span>';
     artBox.classList.add('is-playing');
 
     if (track.has_cover) {
@@ -57,28 +74,29 @@ function startPlayback() {
     }
 
     audio.play();
-    if (typeof _eqCtx !== 'undefined' && _eqCtx && _eqCtx.state === 'suspended') {
+    if (typeof _eqCtx !== 'undefined' && _eqCtx?.state === 'suspended') {
         _eqCtx.resume();
     }
-    document.getElementById('play-icon').innerText = 'pause';
+    _p('play-icon').textContent = 'pause';
 
     updatePlayingRow();
     updatePlayerHeart();
     fetchLyrics(track.title, track.artist);
 
-    // Kick off prefetch for the next couple of tracks in the queue
     PrefetchManager.prefetchUpcoming(2);
 }
 
-// ── Highlight the currently playing row in every track list ──
+// ── Highlight the currently playing row ──────────────────────
+// Clears the previous reference (O(1)) then queries only the new row.
 function updatePlayingRow() {
-    document.querySelectorAll('.track-row').forEach(row => {
-        row.classList.remove('playing', 'paused');
-    });
+    if (_activeRow) {
+        _activeRow.classList.remove('playing', 'paused');
+        _activeRow = null;
+    }
     if (cursor < 0 || !queue[cursor]) return;
-    const path   = encodeURIComponent(queue[cursor].path);
-    const active = document.querySelector(`.track-row[data-path="${path}"]`);
-    if (active) active.classList.add('playing');
+    const path = encodeURIComponent(queue[cursor].path);
+    _activeRow = document.querySelector(`.track-row[data-path="${path}"]`);
+    if (_activeRow) _activeRow.classList.add('playing');
 }
 
 // ── Transport controls ────────────────────────────────────────
@@ -86,14 +104,14 @@ function togglePlay() {
     if (!audio.src) return;
     if (audio.paused) {
         audio.play();
-        document.getElementById('play-icon').innerText = 'pause';
-        document.getElementById('p-art').classList.add('is-playing');
-        document.querySelectorAll('.track-row.playing').forEach(r => r.classList.remove('paused'));
+        _p('play-icon').textContent = 'pause';
+        _p('p-art').classList.add('is-playing');
+        _activeRow?.classList.remove('paused');        // O(1) — no querySelectorAll
     } else {
         audio.pause();
-        document.getElementById('play-icon').innerText = 'play_arrow';
-        document.getElementById('p-art').classList.remove('is-playing');
-        document.querySelectorAll('.track-row.playing').forEach(r => r.classList.add('paused'));
+        _p('play-icon').textContent = 'play_arrow';
+        _p('p-art').classList.remove('is-playing');
+        _activeRow?.classList.add('paused');           // O(1)
     }
 }
 
@@ -120,7 +138,7 @@ function toggleShuffle() {
 }
 
 function updateShuffleUI() {
-    document.getElementById('btn-shuffle').classList.toggle('active', shuffleMode);
+    _p('btn-shuffle').classList.toggle('active', shuffleMode);
 }
 
 function buildShuffleQueue(keepIdx) {
@@ -136,27 +154,38 @@ function buildShuffleQueue(keepIdx) {
 
 // ── Repeat ────────────────────────────────────────────────────
 function toggleRepeat() {
-    if (!repeatMode)            repeatMode = 'all';
+    if (!repeatMode)               repeatMode = 'all';
     else if (repeatMode === 'all') repeatMode = 'one';
-    else                        repeatMode = false;
+    else                           repeatMode = false;
     updateRepeatUI();
     const labels = { false: '↺ Repeat off', all: '↺ Repeat all', one: '↺ Repeat one' };
     showToast(labels[repeatMode]);
 }
 
 function updateRepeatUI() {
-    const btn = document.getElementById('btn-repeat');
+    const btn = _p('btn-repeat');
     btn.classList.toggle('active', !!repeatMode);
-    btn.querySelector('span').innerText = repeatMode === 'one' ? 'repeat_one' : 'repeat';
+    btn.querySelector('span').textContent = repeatMode === 'one' ? 'repeat_one' : 'repeat';
 }
 
 // ── Audio element event handlers ─────────────────────────────
-audio.ontimeupdate = () => {
+// rAF throttle: the browser fires timeupdate 4-5×/sec; we only
+// need to update the UI once per animation frame (~16ms / 60fps).
+let _ticking = false;
+function _onTimeUpdate() {
+    _ticking = false;
     if (!audio.duration) return;
-    const pct = (audio.currentTime / audio.duration) * 100;
-    document.getElementById('progress-fill').style.width = pct + '%';
-    document.getElementById('cur-time').innerText = fmtTime(audio.currentTime);
-    syncLyrics(audio.currentTime);
+    const ct  = audio.currentTime;
+    const dur = audio.duration;
+    _p('progress-fill').style.width = `${(ct / dur) * 100}%`;
+    _p('cur-time').textContent = fmtTime(ct);
+    syncLyrics(ct);
+}
+
+audio.ontimeupdate = () => {
+    if (_ticking) return;
+    _ticking = true;
+    requestAnimationFrame(_onTimeUpdate);
 };
 
 audio.onended = () => {
@@ -166,22 +195,22 @@ audio.onended = () => {
 
 // ── Scrubber ──────────────────────────────────────────────────
 function seek(e) {
-    const rect = document.getElementById('progress-bar').getBoundingClientRect();
+    const rect = _p('progress-bar').getBoundingClientRect();
     const pos  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     audio.currentTime = pos * audio.duration;
 }
 
 function scrubHover(e) {
     if (!audio.duration) return;
-    const bar  = document.getElementById('progress-bar');
+    const bar  = _p('progress-bar');
     const rect = bar.getBoundingClientRect();
     const pos  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    bar.style.setProperty('--hover-pct', (pos * 100) + '%');
+    bar.style.setProperty('--hover-pct', `${pos * 100}%`);
     bar.setAttribute('data-hover-time', fmtTime(pos * audio.duration));
 }
 
 function clearScrubHover() {
-    document.getElementById('progress-bar').removeAttribute('data-hover-time');
+    _p('progress-bar').removeAttribute('data-hover-time');
 }
 
 // ── Volume ────────────────────────────────────────────────────
@@ -189,7 +218,7 @@ function setVolume(e) {
     const rect = e.currentTarget.getBoundingClientRect();
     const vol  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     audio.volume = vol;
-    document.getElementById('vol-fill').style.width = (vol * 100) + '%';
+    _p('vol-fill').style.width = `${vol * 100}%`;
 }
 
 // ── Ambient colour extraction ─────────────────────────────────
@@ -213,7 +242,7 @@ function extractAmbientColor(imgSrc) {
 
             const candidates = [];
             for (let i = 0; i < data.length; i += 4) {
-                const r = data[i], g = data[i+1], b = data[i+2];
+                const r = data[i], g = data[i + 1], b = data[i + 2];
                 const luma = (r * 299 + g * 587 + b * 114) / 1000;
                 if (luma < 28 || luma > 228) continue;
                 const max = Math.max(r, g, b), min = Math.min(r, g, b);
@@ -224,12 +253,15 @@ function extractAmbientColor(imgSrc) {
 
             if (!candidates.length) { resolve({ r: 70, g: 70, b: 70 }); return; }
             candidates.sort((a, b) => b.score - a.score);
-            const top = candidates.slice(0, Math.max(1, Math.floor(candidates.length * 0.2)));
-            const sum = top.reduce((acc, c) => ({ r: acc.r+c.r, g: acc.g+c.g, b: acc.b+c.b }), { r:0, g:0, b:0 });
+            const top = candidates.slice(0, Math.max(1, (candidates.length * 0.2) | 0));
+            const sum = top.reduce(
+                (acc, c) => ({ r: acc.r + c.r, g: acc.g + c.g, b: acc.b + c.b }),
+                { r: 0, g: 0, b: 0 }
+            );
             resolve({
-                r: Math.round(sum.r / top.length),
-                g: Math.round(sum.g / top.length),
-                b: Math.round(sum.b / top.length)
+                r: (sum.r / top.length) | 0,
+                g: (sum.g / top.length) | 0,
+                b: (sum.b / top.length) | 0,
             });
         };
         img.onerror = () => resolve({ r: 70, g: 70, b: 70 });
@@ -242,17 +274,18 @@ function applyAmbientColor(r, g, b) {
     root.style.setProperty('--amb-r', r);
     root.style.setProperty('--amb-g', g);
     root.style.setProperty('--amb-b', b);
-    document.getElementById('ambient-layer').style.background = `
+    _p('ambient-layer').style.background = `
         radial-gradient(ellipse 90% 45% at 50% 108%,  rgba(${r},${g},${b},0.20) 0%, transparent 70%),
         radial-gradient(ellipse 55% 55% at 8%  48%,   rgba(${r},${g},${b},0.07) 0%, transparent 65%)
     `;
 }
 
 function clearAmbientColor() {
-    document.documentElement.style.setProperty('--amb-r', 0);
-    document.documentElement.style.setProperty('--amb-g', 0);
-    document.documentElement.style.setProperty('--amb-b', 0);
-    document.getElementById('ambient-layer').style.background = 'transparent';
+    const root = document.documentElement;
+    root.style.setProperty('--amb-r', 0);
+    root.style.setProperty('--amb-g', 0);
+    root.style.setProperty('--amb-b', 0);
+    _p('ambient-layer').style.background = 'transparent';
 }
 
 // ── Quality / bitrate ─────────────────────────────────────────
@@ -260,8 +293,7 @@ function onQualityChange(val) {
     streamQuality = val;
     if (!audio.src || cursor < 0 || !queue[cursor]) return;
     const wasPlaying = !audio.paused;
-    // Prefetch cache is original-only; transcoded paths must always stream
     audio.src = buildStreamUrl(queue[cursor].path, 0);
-    if (wasPlaying) { audio.play(); document.getElementById('play-icon').innerText = 'pause'; }
+    if (wasPlaying) { audio.play(); _p('play-icon').textContent = 'pause'; }
     showToast(`🎛 ${val === 'original' ? 'Original quality' : val + ' kbps'}`);
 }
